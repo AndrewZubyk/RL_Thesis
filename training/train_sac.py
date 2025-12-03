@@ -36,29 +36,20 @@ def train_with_runtime_monitoring():
         tensorboard_log=log_dir # Log directory for tensorboard
     )
 
+    # Checkpoint callback
+    checkpoint_callback = CheckpointCallback(
+        save_freq = 50000,
+        save_path = './models/',
+        name_prefix='sac_flight_model'
+    )
+
     print("Starting training...")
 
-    obs, info = env.reset()
-    for step in range(1, total_timesteps + 1):
-
-        # Action selection by prediction
-        action, _ = model.predict(obs, deterministic=False)
-
-        # Attach runtime monitoring
-        send_action = apply_runtime(action, obs)
-
-        # Step the environment
-        obs, reward, terminated, truncated, info = env.step(send_action)
-
-        # Store transition and update model
-        model.learn(total_timesteps=1, reset_num_timesteps=False)
-        
-        if terminated or truncated:
-            obs, info = env.reset()
-            
-        if step % 50000 == 0:
-            print(f"Timestep: {step}")
-            model.save(f"{model_dir}/sac_flight_controller_{step}")
+    model.learn(
+        total_timesteps=500000,
+        callback=checkpoint_callback,
+        progress_bar=True
+    )
 
     # Final save
     model.save(f"{model_dir}/sac_final")

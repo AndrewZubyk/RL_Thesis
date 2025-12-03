@@ -9,6 +9,10 @@ class FlightEnvironment(gym.Env):
     def __init__(self, host = '127.0.0.1', port = 44444): #gonna have to put the host and port into this as well ex; (selv, host = , port = )
         super(FlightEnvironment, self).__init__()
 
+        # Setup
+        self.target_altitude = 500.0
+        self.max_altidude = 1000.0
+
         # Define the observation space, this being the state of the flight simulator
         obs_low = np.array([-1000.0, -1000.0, -1000.0, -np.pi, -np.pi, -np.pi, 0.0, 0.0, 0.0])  # Example low values, change these later
         obs_high = np.array([1000.0, 1000.0, 1000.0, np.pi, np.pi, np.pi, 1000.0, 1000.0, 1000.0])  # Example high values, change these later
@@ -26,10 +30,13 @@ class FlightEnvironment(gym.Env):
         self.is_connected = False
         
         print(f"Trying to connect to Simulink on: {host}:{port}...")
-        self.client_socket.connect((host, port))
-        self.client_socket.settimeout(5.0)
-        self.is_connected = True
-        print("Simulink connected successfully.")
+        try:
+            self.client_socket.connect((host, port))
+            self.client_socket.settimeout(5.0)
+            self.is_connected = True
+            print("Simulink connected successfully.")
+        except ConnectionRefusedError:
+            print("Connection Failed.")
 
     def _receive_data(self):
         '''
@@ -37,9 +44,56 @@ class FlightEnvironment(gym.Env):
         basic setup for now, fix this later to get right data
         '''
 
-        data = self.client_socket.recv(36)
-        state = struct.unpack('9f', data)
-        return np.array(state, dtype=np.float32)
+        expected_floats = 9
+        expected_bytes = expected_floats * 4
+
+        try:
+            data = self.client_socket.recv(expected_bytes)
+            if not data or len(data) != expected_bytes:
+                raise ConnectionError("Incomplete Data")
+            
+            state = np.array(struct.unpack(f'{expected_floats}f', data), dtype=np.float32)
+            return state
+        except Exception as e:
+            raise e
+
+    def calc_reward(self, observation, action):
+        '''
+        Reward function calculation
+        '''
+
+        z = observation[2]  # Altitude
+        roll = observation[3] # Roll angle
+        pitch = observation[4] # Pitch angle
+
+        altitude_error = abs(self.target_altitude - z)
+        reward_altitude = 1.0 - (altitude_error / self.max_altidude)
+
+        stability_penalty = abs(roll) + abs(pitch)
+
+        penalty_action = np.sum(np.square(action)) * 0.1
+
+        # Total Reward
+        total_reward = reward_altitude - (stability_penalty * 0.5) - penalty_action
+        
+        return float(total_reward)
+    
+    def check_termination(self, observation):
+        '''
+        Check if the episode should terminate
+        '''
+
+        z = observation[2]  # Altitude
+        roll = observation[3] # Roll angle
+        pitch = observation[4] # Pitch angle
+
+        if z < 0 or z > self.max_altidude:
+            return True  # Terminate if altitude is too far out of bounds
+
+        if abs(roll) > (np.pi / 2) or abs(pitch) > (np.pi / 2):
+            return True  # Terminate if aircraft is upside down
+
+        return False
 
     def step(self, action):
         '''
@@ -48,26 +102,31 @@ class FlightEnvironment(gym.Env):
         '''
 
         if not self.is_connected:
-            raise ConnectionError("Not connected to Simulink.")
-        
-        # send the action to simulink, in 4 bytes format
-        format_send = '4f'
-        action_packed = struct.pack(format_send, *action)
-        self.client_socket.sendall(action_packed)
+            return np.zeros(9, dtype=np.float32), 0.0, True, False, {}
 
-        # receive the new state from Simulink
         try:
-            observation, reward, terminated = self._receive_data()
-        except (ConnectionError, struct.error) as e:
+            action_list = action.tolist() if isinstance(action, np.ndarray) else action
+            self.client_socket.sendall(struct.pack('4f', *action_list))
+
+            observation = self._receive_data()
+
+            reward = self.calc_reward(observation, action)
+
+            terminated = self.check_termination(observation)
+            
+            if terminated and observation[2] <= 0:
+                reward = -100.0
+
+        except (ConnectionError, struct.error, OSError) as e:
             print(f"Error during step: {e}")
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
-            reward = -100.0 # Penalty when the connection fails
+            reward = 0.0
             terminated = True
-
-        # Implement runtime monitoring actions here, after step is made, but before the sending to the action
+        
+        truncated = False
         info = {}
 
-        return observation, reward, terminated, False, info
+        return observation, reward, terminated, truncated, info
     
     def reset(self, seed=None, options=None):
         '''
@@ -76,25 +135,15 @@ class FlightEnvironment(gym.Env):
 
         super().reset(seed=seed)
 
-        reset_action = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)  # Neutral action for reset
-        self.client_socket.sendall(struct.pack('4f', *reset_action))
-
+        # Sets zeros to reset the environment
+        reset_action = [0.0, 0.0, 0.0, 0.0] 
         try:
-            data_format = '<12f' # 12 floats for observation states
-            data_size = struct.calcsize(data_format)
-            
-            data = self.client_socket.recv(data_size)
-            if not data or len(data) != data_size:
-                 raise ConnectionError("Lost connection or incomplete data on reset.")
-            
-            observation = np.array(struct.unpack(data_format, data), dtype=np.float32)
-            
-        except (ConnectionError, struct.error) as e:
-            print(f"Error during reset: {e}")
+            self.client_socket.sendall(struct.pack('4f', *reset_action))
+            observation = self._receive_data()
+        except Exception:
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
-
-        info = {}
-        return observation, info
+            
+        return observation, {}
         
     def close(self):
         '''
@@ -102,4 +151,3 @@ class FlightEnvironment(gym.Env):
         '''
 
         self.client_socket.close()
-        self.is_connected = False
