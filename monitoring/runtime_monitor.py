@@ -2,7 +2,7 @@ import numpy as np
 
 # Define all the constrains
 
-max_altitude = 1000.0 # Random max alt for now
+max_altitude = 10000.0 # Random max alt for now
 
 max_pitch_angle_rad = np.pi / 6  # 30 degrees in radians
 
@@ -49,7 +49,8 @@ def apply_runtime(action: np.ndarray, observation: np.ndarray) -> np.ndarray:
     '''
 
     if check_violations(observation, action):
-         print("Shield: violation detected, taking corrective action.")
+         #print("Shield: violation detected, taking corrective action.")
 
          safe_action = np.zeros_like(action)
          return safe_action
+    return action

@@ -4,7 +4,7 @@ import numpy as np
 
 from monitoring.runtime_monitor import apply_runtime
 
-class flight_rapper(gym.Wrapper):
+class flight_wrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self.last_observation = None

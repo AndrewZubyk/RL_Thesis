@@ -9,13 +9,16 @@ class FlightEnvironment(gym.Env):
     def __init__(self, host = '127.0.0.1', port = 44444): #gonna have to put the host and port into this as well ex; (selv, host = , port = )
         super(FlightEnvironment, self).__init__()
 
-        # Setup
-        self.target_altitude = 500.0
-        self.max_altidude = 1000.0
+        # Setup helps with reward calc
+        self.target_altitude = 5000.0
+        self.max_altitude = 10000.0
+
+        self.max_steps = 2000
+        self.current_step = 0
 
         # Define the observation space, this being the state of the flight simulator
-        obs_low = np.array([-1000.0, -1000.0, -1000.0, -np.pi, -np.pi, -np.pi, 0.0, 0.0, 0.0])  # Example low values, change these later
-        obs_high = np.array([1000.0, 1000.0, 1000.0, np.pi, np.pi, np.pi, 1000.0, 1000.0, 1000.0])  # Example high values, change these later
+        obs_low = np.array([-20000.0]*9)   # Example low values, change these later
+        obs_high = np.array([20000.0]*9)   # Example high values, change these later
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
 
         # Define the action space, control points of the aircraft, elevators, ailerons, rudder, throttle
@@ -26,17 +29,17 @@ class FlightEnvironment(gym.Env):
         # Simulink connection parameters with the tcp/ip
         self.host = host
         self.port = port
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.is_connected = False
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        print(f"Trying to connect to Simulink on: {host}:{port}...")
-        try:
-            self.client_socket.connect((host, port))
-            self.client_socket.settimeout(5.0)
-            self.is_connected = True
-            print("Simulink connected successfully.")
-        except ConnectionRefusedError:
-            print("Connection Failed.")
+        print(f"Server started. Waiting for Simulink to connect on {host}:{port}...")
+        self.server_socket.bind((host, port))
+        self.server_socket.listen(1)
+        
+        # The script will PAUSE here until you hit 'Run' in Simulink
+        self.conn, self.addr = self.server_socket.accept()
+        self.is_connected = True
+        print(f"Simulink connected from: {self.addr}")
 
     def _receive_data(self):
         '''
@@ -48,33 +51,74 @@ class FlightEnvironment(gym.Env):
         expected_bytes = expected_floats * 4
 
         try:
-            data = self.client_socket.recv(expected_bytes)
+            data = self.conn.recv(expected_bytes)
             if not data or len(data) != expected_bytes:
                 raise ConnectionError("Incomplete Data")
             
             state = np.array(struct.unpack(f'{expected_floats}f', data), dtype=np.float32)
+            
+            # --- ADD THIS DEBUG PRINT FOR STATE CHECK ---
+            #print(f"DEBUG OBS: {state}") 
+            # ----------------------------
+
             return state
         except Exception as e:
             raise e
 
     def calc_reward(self, observation, action):
         '''
-        Reward function calculation
+        Reward based on:
+        1. 3D Distance to Waypoint (North, East, Alt)
+        2. Heading Alignment (Facing the waypoint)
+        3. Stability/Action Penalties
         '''
+        
+        north = observation[0]
+        east  = observation[1]
+        alt   = observation[2]
+        roll  = observation[3]
+        pitch = observation[4]
+        yaw   = observation[5] 
+        
+        target_north = 5000.0
+        target_east  = 5000.0 
+        target_alt   = 3000.0
 
-        z = observation[2]  # Altitude
-        roll = observation[3] # Roll angle
-        pitch = observation[4] # Pitch angle
+        # --- Error Calcs ---
+        
+        # Vector from plane to target
+        error_n = target_north - north
+        error_e = target_east - east
+        error_z = target_alt - alt
+        
+        # 3D Straight Line Distance
+        dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
+        
+        # Desired Heading (The angle to the target)
+        desired_yaw = np.arctan2(error_e, error_n)
+        
+        # Heading Error (Difference between current Yaw and Desired Yaw)
+        heading_error = np.arctan2(np.sin(desired_yaw - yaw), np.cos(desired_yaw - yaw))
 
-        altitude_error = abs(self.target_altitude - z)
-        reward_altitude = 1.0 - (altitude_error / self.max_altidude)
+        # --- Reward Calcs ---
 
-        stability_penalty = abs(roll) + abs(pitch)
+        # Distance Reward
+        reward_dist = np.exp(-dist_3d / 2000.0) * 5.0 
 
-        penalty_action = np.sum(np.square(action)) * 0.1
+        # Heading Reward
+        reward_heading = np.cos(heading_error) * 2.0
 
-        # Total Reward
-        total_reward = reward_altitude - (stability_penalty * 0.5) - penalty_action
+        # Penalties
+        penalty_action = np.sum(np.square(action)) * 0.05
+        
+        # Stability: Penalize huge roll (upside down) or extreme pitch
+        penalty_stability = 0.0
+        if abs(roll) > 0.78: 
+            penalty_stability += abs(roll) * 0.5
+        
+        # --- TOTAL ---
+        
+        total_reward = reward_dist + reward_heading - penalty_stability - penalty_action
         
         return float(total_reward)
     
@@ -87,7 +131,7 @@ class FlightEnvironment(gym.Env):
         roll = observation[3] # Roll angle
         pitch = observation[4] # Pitch angle
 
-        if z < 0 or z > self.max_altidude:
+        if z < 0 or z > self.max_altitude:
             return True  # Terminate if altitude is too far out of bounds
 
         if abs(roll) > (np.pi / 2) or abs(pitch) > (np.pi / 2):
@@ -101,14 +145,23 @@ class FlightEnvironment(gym.Env):
         Receives new states and rewards
         '''
 
+        self.current_step += 1
+
         if not self.is_connected:
             return np.zeros(9, dtype=np.float32), 0.0, True, False, {}
 
         try:
             action_list = action.tolist() if isinstance(action, np.ndarray) else action
-            self.client_socket.sendall(struct.pack('4f', *action_list))
+            full_action = list(action_list) + [0.0]
+            self.conn.sendall(struct.pack('5f', *full_action))
 
             observation = self._receive_data()
+
+            # NaN check
+            if np.isnan(observation).any() or np.isinf(observation).any():
+                print("!!! CRITICAL: Physics instability detected. Resetting episode.")
+                safe_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+                return safe_obs, -100.0, True, False, {}
 
             reward = self.calc_reward(observation, action)
 
@@ -120,11 +173,19 @@ class FlightEnvironment(gym.Env):
         except (ConnectionError, struct.error, OSError) as e:
             print(f"Error during step: {e}")
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
+            
             reward = 0.0
             terminated = True
         
         truncated = False
+        if self.current_step >= self.max_steps:
+            truncated = True
         info = {}
+
+        if np.isnan(observation).any() or np.isinf(observation).any():
+            print("!!! CRITICAL: Physics instability detected. Resetting episode.")
+            safe_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+            return safe_obs, -100.0, True, False, {}
 
         return observation, reward, terminated, truncated, info
     
@@ -132,13 +193,29 @@ class FlightEnvironment(gym.Env):
         '''
         Resets environment to a new episode
         '''
-
         super().reset(seed=seed)
 
-        # Sets zeros to reset the environment
-        reset_action = [0.0, 0.0, 0.0, 0.0] 
+        self.current_step = 0
+
+        # 1. FLUSH THE BUFFER (Recommended)
         try:
-            self.client_socket.sendall(struct.pack('4f', *reset_action))
+            self.conn.setblocking(0)
+            while True:
+                data = self.conn.recv(1024)
+                if not data: break
+        except BlockingIOError:
+            pass
+        except Exception:
+            pass
+        finally:
+            self.conn.setblocking(1)
+
+        # [Elevator, Aileron, Rudder, Throttle, Reset Flag]
+        reset_action = [0.0, 0.0, 0.0, 0.0, 1.0] 
+        
+        try:
+            self.conn.sendall(struct.pack('4f', *reset_action))
+            # Simulink will receive -100 -> Reset Integrators -> Return (0,0,0) state
             observation = self._receive_data()
         except Exception:
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
@@ -150,4 +227,4 @@ class FlightEnvironment(gym.Env):
         Closes the connection to Simulink
         '''
 
-        self.client_socket.close()
+        self.conn.close()
