@@ -1,0 +1,5 @@
+# Ignore the logs folder
+logs/
+
+# Ignore the models folder
+models/

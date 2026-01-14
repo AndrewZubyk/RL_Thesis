@@ -16,9 +16,13 @@ from monitoring.runtime_monitor import apply_runtime
 from wrapper.flight_wrapper import flight_wrapper
 
 # Configure
-log_dir = "./logs/"
-model_dir = "./models/"
-total_timesteps = 250000 # Adjust if more or less time needed
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+
+log_dir = os.path.join(parent_dir, "logs")
+model_dir = os.path.join(parent_dir, "models")
+
+total_timesteps = 1000000 # Adjust if more or less time needed
 
 def train_with_runtime_monitoring():
     '''
@@ -55,7 +59,7 @@ def train_with_runtime_monitoring():
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
         save_freq = 50000,
-        save_path = './models/',
+        save_path = model_dir,
         name_prefix='sac_flight_model'
     )
 

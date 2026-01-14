@@ -96,29 +96,37 @@ class FlightEnvironment(gym.Env):
         
         # Desired Heading (The angle to the target)
         desired_yaw = np.arctan2(error_e, error_n)
-        
-        # Heading Error (Difference between current Yaw and Desired Yaw)
         heading_error = np.arctan2(np.sin(desired_yaw - yaw), np.cos(desired_yaw - yaw))
 
-        # --- Reward Calcs ---
+        # --- Reward Components ---
 
-        # Distance Reward
-        reward_dist = np.exp(-dist_3d / 2000.0) * 5.0 
+        # Distance Penalty (Aggressive, and linear to negate staying still)
+        reward_dist = -(dist_3d / 1000.0) 
 
-        # Heading Reward
-        reward_heading = np.cos(heading_error) * 2.0
+        # Heading Reward, encourage looking at taget
+        reward_heading = np.cos(heading_error) * 1.0
 
-        # Penalties
-        penalty_action = np.sum(np.square(action)) * 0.05
+        # Altitude Incentive
+        reward_alt = 0.0
+        if alt < target_alt:
+            if pitch > 0.05: 
+                reward_alt = pitch * 2.0
         
-        # Stability: Penalize huge roll (upside down) or extreme pitch
+        # --- Penalties ---
+        penalty_action = np.sum(np.square(action)) * 0.1
+        
         penalty_stability = 0.0
+        
+        if alt < (target_alt - 100) and pitch < -0.1:
+            penalty_stability += abs(pitch) * 2.0
+
         if abs(roll) > 0.78: 
-            penalty_stability += abs(roll) * 0.5
+            penalty_stability += abs(roll) * 1.0
         
         # --- TOTAL ---
         
-        total_reward = reward_dist + reward_heading - penalty_stability - penalty_action
+        # Reward only gets close to zero as plane gets very close to target
+        total_reward = reward_dist + reward_heading + reward_alt - penalty_stability - penalty_action
         
         return float(total_reward)
     
@@ -156,14 +164,29 @@ class FlightEnvironment(gym.Env):
             self.conn.sendall(struct.pack('5f', *full_action))
 
             observation = self._receive_data()
+            
+            north = observation[0]
+            east  = observation[1]
+            alt   = observation[2]
 
-            # NaN check
-            if np.isnan(observation).any() or np.isinf(observation).any():
-                print("!!! CRITICAL: Physics instability detected. Resetting episode.")
-                safe_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-                return safe_obs, -100.0, True, False, {}
+            target_north = 5000.0
+            target_east  = 5000.0 
+            target_alt   = 3000.0
 
-            reward = self.calc_reward(observation, action)
+            # Calculate Distance
+            error_n = target_north - north
+            error_e = target_east - east
+            error_z = target_alt - alt
+            dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
+            dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
+            
+            # SUCCESS CONDITION
+            if dist_3d < 50.0:
+                terminated = True
+                reward += 1000.0  # Big bonus for getting there
+                print(f"*** TARGET REACHED at Step {self.current_step}! ***")
+            else:
+                reward = self.calc_reward(observation, action)
 
             terminated = self.check_termination(observation)
             
@@ -197,7 +220,7 @@ class FlightEnvironment(gym.Env):
 
         self.current_step = 0
 
-        # 1. FLUSH THE BUFFER (Recommended)
+        # Flush buffer
         try:
             self.conn.setblocking(0)
             while True:
@@ -215,7 +238,6 @@ class FlightEnvironment(gym.Env):
         
         try:
             self.conn.sendall(struct.pack('4f', *reset_action))
-            # Simulink will receive -100 -> Reset Integrators -> Return (0,0,0) state
             observation = self._receive_data()
         except Exception:
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
