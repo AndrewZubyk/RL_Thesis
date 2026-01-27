@@ -22,7 +22,7 @@ parent_dir = os.path.dirname(current_dir)
 log_dir = os.path.join(parent_dir, "logs")
 model_dir = os.path.join(parent_dir, "models")
 
-total_timesteps = 1000000 # Adjust if more or less time needed
+total_timesteps = 100000 # Adjust if more or less time needed
 
 def train_with_runtime_monitoring():
     '''
