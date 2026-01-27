@@ -92,6 +92,17 @@ real_T look1_binlxpw(real_T u0, const real_T bp0[], const real_T table[],
  */
 void Thesis_C__::rt_ertODEUpdateContinuousStates(RTWSolverInfo *si )
 {
+  // --- ADDED DEBUG PRINTS ---
+  // printf("DEBUG: Inside rt_ertODEUpdateContinuousStates\n"); 
+  // if (si == nullptr) printf("CRITICAL: si is NULL\n");
+  // else {
+  //    if (si->tPtr == nullptr) printf("CRITICAL: si->tPtr is NULL\n");
+  //    if (si->contStatesPtr == nullptr) printf("CRITICAL: si->contStatesPtr is NULL\n");
+  //    if (si->solverData == nullptr) printf("CRITICAL: si->solverData is NULL\n");
+  // }
+  // fflush(stdout);
+  // --------------------------
+  
   time_T t { rtsiGetT(si) };
 
   time_T tnew { rtsiGetSolverStopTime(si) };

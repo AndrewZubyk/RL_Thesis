@@ -6,40 +6,50 @@ import os
 
 class FlightEnvironment(gym.Env):
 
-    def __init__(self, dll_path=r'C:\Users\Bridl\Documents\Thesis\Matlab\Thesis_C___grt_rtw\flight_model.dll'):
+    def __init__(self, dll_path=r'./Thesis_C___grt_rtw/flight_model.so'):
         super(FlightEnvironment, self).__init__()
 
         # --- CTYPES SETUP ---
-        # Load the compiled library
         if not os.path.exists(dll_path):
             raise FileNotFoundError(f"DLL not found at {dll_path}")
         
         self.model = ctypes.CDLL(dll_path)
 
-        # Define the 4 inputs (Actions) and 9 outputs (Observations) pointers
-        # These names must match what you found in Thesis_C__.h
+        # 1. Define Argument Types (CRITICAL for 64-bit Linux)
         self.model.Thesis_C___initialize.argtypes = []
-        self.model.Thesis_C___step.argtypes = []
+        self.model.Thesis_C___initialize.restype = None
 
-        # Setup helps with reward calc
+        self.model.Thesis_C___step.argtypes = []
+        self.model.Thesis_C___step.restype = None
+
+        # You MUST tell ctypes that these functions take pointers to doubles
+        self.model.set_inputs.argtypes = [ctypes.POINTER(ctypes.c_double)]
+        self.model.set_inputs.restype = None
+
+        self.model.get_outputs.argtypes = [ctypes.POINTER(ctypes.c_double)]
+        self.model.get_outputs.restype = None
+
+        # ... rest of your setup (target_altitude, etc) ...
         self.target_altitude = 3000.0
         self.max_altitude = 10000.0
         self.max_steps = 2000
         self.current_step = 0
-
-        # Define the observation space (9 states)
+        
+        # ... observation/action spaces ...
         obs_low = np.array([-20000.0]*9, dtype=np.float32)
         obs_high = np.array([20000.0]*9, dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
-
-        # Define the action space (4 controls)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
     def _get_obs(self):
         """Helper to pull 9 observations from the C++ memory."""
-        # Create a buffer for 9 doubles (or floats, check your rtwtypes.h)
+        # Create a buffer for 9 doubles
         obs_buffer = (ctypes.c_double * 9)() 
-        self.model.get_outputs(ctypes.byref(obs_buffer)) # You'll need to define this wrapper in C or use direct struct access
+        
+        # Cast the array to a double pointer (LP_c_double)
+        c_double_pointer = ctypes.cast(obs_buffer, ctypes.POINTER(ctypes.c_double))
+        
+        self.model.get_outputs(c_double_pointer)
         return np.array(obs_buffer, dtype=np.float32)
     
     def calc_reward(self, observation, action):
@@ -128,10 +138,12 @@ class FlightEnvironment(gym.Env):
         self.current_step += 1
 
         # 1. Inject actions into C++ model
-        action_data = np.array(action, dtype=np.float64) # Use double to match Navion stability derivatives
-        self.model.set_inputs(action_data.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
+        action_data = np.array(action, dtype=np.float64)
+        # Cast to pointer
+        action_ptr = action_data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+        self.model.set_inputs(action_ptr)
 
-        # 2. Run physics for exactly one step
+        # 2. Run physics
         self.model.Thesis_C___step()
 
         # 3. Pull new observations
