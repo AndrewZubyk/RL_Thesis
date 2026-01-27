@@ -1,70 +1,47 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import socket
-import struct
+import ctypes
+import os
 
 class FlightEnvironment(gym.Env):
 
-    def __init__(self, host = '127.0.0.1', port = 44444): #gonna have to put the host and port into this as well ex; (selv, host = , port = )
+    def __init__(self, dll_path=r'C:\Users\Bridl\Documents\Thesis\Matlab\Thesis_C___grt_rtw\flight_model.dll'):
         super(FlightEnvironment, self).__init__()
 
-        # Setup helps with reward calc
-        self.target_altitude = 5000.0
-        self.max_altitude = 10000.0
+        # --- CTYPES SETUP ---
+        # Load the compiled library
+        if not os.path.exists(dll_path):
+            raise FileNotFoundError(f"DLL not found at {dll_path}")
+        
+        self.model = ctypes.CDLL(dll_path)
 
+        # Define the 4 inputs (Actions) and 9 outputs (Observations) pointers
+        # These names must match what you found in Thesis_C__.h
+        self.model.Thesis_C___initialize.argtypes = []
+        self.model.Thesis_C___step.argtypes = []
+
+        # Setup helps with reward calc
+        self.target_altitude = 3000.0
+        self.max_altitude = 10000.0
         self.max_steps = 2000
         self.current_step = 0
 
-        # Define the observation space, this being the state of the flight simulator
-        obs_low = np.array([-20000.0]*9)   # Example low values, change these later
-        obs_high = np.array([20000.0]*9)   # Example high values, change these later
+        # Define the observation space (9 states)
+        obs_low = np.array([-20000.0]*9, dtype=np.float32)
+        obs_high = np.array([20000.0]*9, dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
 
-        # Define the action space, control points of the aircraft, elevators, ailerons, rudder, throttle
-        # Normalied actions between -1 and 1
+        # Define the action space (4 controls)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-
-        # Simulink connection parameters with the tcp/ip
-        self.host = host
-        self.port = port
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        print(f"Server started. Waiting for Simulink to connect on {host}:{port}...")
-        self.server_socket.bind((host, port))
-        self.server_socket.listen(1)
-        
-        # The script will PAUSE here until you hit 'Run' in Simulink
-        self.conn, self.addr = self.server_socket.accept()
-        self.is_connected = True
-        print(f"Simulink connected from: {self.addr}")
-
-    def _receive_data(self):
-        '''
-        Receives data from Simulink
-        basic setup for now, fix this later to get right data
-        '''
-
-        expected_floats = 9
-        expected_bytes = expected_floats * 4
-
-        try:
-            data = self.conn.recv(expected_bytes)
-            if not data or len(data) != expected_bytes:
-                raise ConnectionError("Incomplete Data")
-            
-            state = np.array(struct.unpack(f'{expected_floats}f', data), dtype=np.float32)
-            
-            # --- ADD THIS DEBUG PRINT FOR STATE CHECK ---
-            #print(f"DEBUG OBS: {state}") 
-            # ----------------------------
-
-            return state
-        except Exception as e:
-            raise e
-
+    def _get_obs(self):
+        """Helper to pull 9 observations from the C++ memory."""
+        # Create a buffer for 9 doubles (or floats, check your rtwtypes.h)
+        obs_buffer = (ctypes.c_double * 9)() 
+        self.model.get_outputs(ctypes.byref(obs_buffer)) # You'll need to define this wrapper in C or use direct struct access
+        return np.array(obs_buffer, dtype=np.float32)
+    
     def calc_reward(self, observation, action):
         '''
         Reward based on:
@@ -148,105 +125,41 @@ class FlightEnvironment(gym.Env):
         return False
 
     def step(self, action):
-        '''
-        Action setup for Simulink:
-        Receives new states and rewards
-        '''
-
         self.current_step += 1
 
-        if not self.is_connected:
-            return np.zeros(9, dtype=np.float32), 0.0, True, False, {}
+        # 1. Inject actions into C++ model
+        action_data = np.array(action, dtype=np.float64) # Use double to match Navion stability derivatives
+        self.model.set_inputs(action_data.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))
 
-        try:
-            action_list = action.tolist() if isinstance(action, np.ndarray) else action
-            full_action = list(action_list) + [0.0]
-            self.conn.sendall(struct.pack('5f', *full_action))
+        # 2. Run physics for exactly one step
+        self.model.Thesis_C___step()
 
-            observation = self._receive_data()
-            
-            north = observation[0]
-            east  = observation[1]
-            alt   = observation[2]
-
-            target_north = 5000.0
-            target_east  = 5000.0 
-            target_alt   = 3000.0
-
-            # Calculate Distance
-            error_n = target_north - north
-            error_e = target_east - east
-            error_z = target_alt - alt
-            dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
-            dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
-            
-            # SUCCESS CONDITION
-            if dist_3d < 50.0:
-                terminated = True
-                reward += 1000.0  # Big bonus for getting there
-                print(f"*** TARGET REACHED at Step {self.current_step}! ***")
-            else:
-                reward = self.calc_reward(observation, action)
-
-            terminated = self.check_termination(observation)
-            
-            if terminated and observation[2] <= 0:
-                reward = -100.0
-
-        except (ConnectionError, struct.error, OSError) as e:
-            print(f"Error during step: {e}")
-            observation = np.zeros(self.observation_space.shape, dtype=np.float32)
-            
-            reward = 0.0
-            terminated = True
+        # 3. Pull new observations
+        observation = self._get_obs()
         
-        truncated = False
-        if self.current_step >= self.max_steps:
-            truncated = True
-        info = {}
+        # 4. Reward Logic (Use your existing calc_reward function)
+        reward = self.calc_reward(observation, action)
 
-        if np.isnan(observation).any() or np.isinf(observation).any():
-            print("!!! CRITICAL: Physics instability detected. Resetting episode.")
-            safe_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-            return safe_obs, -100.0, True, False, {}
+        # 5. Check Success/Failure
+        terminated = self.check_termination(observation)
+        
+        # Check distance to waypoint for success bonus
+        dist_3d = np.sqrt((5000-observation[0])**2 + (5000-observation[1])**2 + (3000-observation[2])**2)
+        if dist_3d < 50.0:
+            terminated = True
+            reward += 1000.0
+            print(f"Target Reached!")
 
-        return observation, reward, terminated, truncated, info
+        truncated = self.current_step >= self.max_steps
+        
+        return observation, float(reward), terminated, truncated, {}
     
     def reset(self, seed=None, options=None):
-        '''
-        Resets environment to a new episode
-        '''
         super().reset(seed=seed)
-
         self.current_step = 0
-
-        # Flush buffer
-        try:
-            self.conn.setblocking(0)
-            while True:
-                data = self.conn.recv(1024)
-                if not data: break
-        except BlockingIOError:
-            pass
-        except Exception:
-            pass
-        finally:
-            self.conn.setblocking(1)
-
-        # [Elevator, Aileron, Rudder, Throttle, Reset Flag]
-        reset_action = [0.0, 0.0, 0.0, 0.0, 1.0] 
         
-        try:
-            self.conn.sendall(struct.pack('4f', *reset_action))
-            observation = self._receive_data()
-        except Exception:
-            observation = np.zeros(self.observation_space.shape, dtype=np.float32)
-            
+        # Call the C++ initialize function to reset physics to 1000ft
+        self.model.Thesis_C___initialize()
+        
+        observation = self._get_obs()
         return observation, {}
-        
-    def close(self):
-        '''
-        Closes the connection to Simulink
-        '''
-
-        self.conn.close()
