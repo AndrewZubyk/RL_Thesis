@@ -22,7 +22,7 @@ parent_dir = os.path.dirname(current_dir)
 log_dir = os.path.join(parent_dir, "logs")
 model_dir = os.path.join(parent_dir, "models")
 
-total_timesteps = 100000 # Adjust if more or less time needed
+total_timesteps = 10000000 # Adjust if more or less time needed
 
 def train_with_runtime_monitoring():
     '''
@@ -36,9 +36,13 @@ def train_with_runtime_monitoring():
 
     # Creates the environment, it is a single environment. Should I use VecEnv?
     try:
-        raw_env = FlightEnvironment()
-    except ConnectionRefusedError:
-        print("Could not connect to Simulink. Ensure that Simulink is running and listening on the correct port.")
+        raw_env = FlightEnvironment(dll_path='./Thesis_C___grt_rtw/flight_model.so')
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Ensure the .so file is compiled and in the correct directory for the HPC.")
+        return
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
         return
     
     env = flight_wrapper(raw_env)
@@ -58,7 +62,7 @@ def train_with_runtime_monitoring():
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq = 50000,
+        save_freq = 250000,
         save_path = model_dir,
         name_prefix='sac_flight_model'
     )
@@ -68,7 +72,7 @@ def train_with_runtime_monitoring():
     model.learn(
         total_timesteps=total_timesteps,
         callback=checkpoint_callback,
-        progress_bar=True
+        progress_bar=False
     )
 
     # Final save
