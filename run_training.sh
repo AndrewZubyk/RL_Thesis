@@ -1,13 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=rl_flight_sac
-#SBATCH --output=logs/training_output_%j.log  # All prints stats go here
-#SBATCH --error=logs/training_errors_%j.log   # Any system errors go here
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=24:00:00                       # Time marked for training
-#SBATCH --gres=gpu:1                          # Request 1 GPU
-#SBATCH --partition=gpu                       # Specify the GPU partition
+#PBS -N rl_flight_sac
+#PBS -l nodes=1:ppn=192:gpus=1
+#PBS -l walltime=24:00:00
+#PBS -q normalq
+#PBS -j oe
+#PBS -o logs/trainingoutput$PBS_JOBID.log
 
 # Load the Python module
 module load python/3.10
