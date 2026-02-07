@@ -15,7 +15,7 @@ class FlightEnvironment(gym.Env):
         
         self.model = ctypes.CDLL(dll_path)
 
-        # 1. Define Argument Types (CRITICAL for 64-bit Linux)
+        # Define Argument Types
         self.model.Thesis_C___initialize.argtypes = []
         self.model.Thesis_C___initialize.restype = None
 
@@ -29,13 +29,14 @@ class FlightEnvironment(gym.Env):
         self.model.get_outputs.argtypes = [ctypes.POINTER(ctypes.c_double)]
         self.model.get_outputs.restype = None
 
-        # ... rest of your setup (target_altitude, etc) ...
+        # ... rest of setup ...
         self.target_altitude = 3000.0
         self.max_altitude = 10000.0
         self.max_steps = 2000
         self.current_step = 0
         
         # ... observation/action spaces ...
+        # theta, phi, psi, p, q, r, north, east, alt
         obs_low = np.array([-20000.0]*9, dtype=np.float32)
         obs_high = np.array([20000.0]*9, dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
