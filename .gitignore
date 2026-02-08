@@ -3,3 +3,6 @@ logs/
 
 # Ignore the models folder
 models/
+
+# Ignore HPC Folder
+HPC_Results/
