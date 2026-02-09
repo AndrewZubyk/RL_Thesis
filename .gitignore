@@ -6,3 +6,10 @@ models/
 
 # Ignore HPC Folder
 HPC_Results/
+
+# Ignore the .vscode folder
+.vscode/
+
+# Ignore python bytecode
+*.pyc
+__pycache__/
