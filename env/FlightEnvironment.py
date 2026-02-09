@@ -30,10 +30,12 @@ class FlightEnvironment(gym.Env):
         self.model.get_outputs.restype = None
 
         # ... rest of setup ...
-        self.target_altitude = 3000.0
+        self.target_pos = np.array([5000.0, 5000.0, 3000.0], dtype=np.float32)
         self.max_altitude = 10000.0
         self.max_steps = 2000
         self.current_step = 0
+
+        self.prev_dist = 0.0
         
         # ... observation/action spaces ...
         # theta, phi, psi, p, q, r, north, east, alt
@@ -53,7 +55,7 @@ class FlightEnvironment(gym.Env):
         self.model.get_outputs(c_double_pointer)
         return np.array(obs_buffer, dtype=np.float32)
     
-    def calc_reward(self, observation, action):
+    def calc_reward(self, observation, action, terminated):
         '''
         Reward based on:
         1. 3D Distance to Waypoint (North, East, Alt)
@@ -68,53 +70,40 @@ class FlightEnvironment(gym.Env):
         pitch = observation[4]
         yaw   = observation[5] 
         
-        target_north = 5000.0
-        target_east  = 5000.0 
-        target_alt   = 3000.0
+        # Calculate distance
+        current_pos = np.array([north, east, alt])
+        dist_3d = np.linalg.norm(self.target_pos - current_pos)
 
-        # --- Error Calcs ---
-        
-        # Vector from plane to target
-        error_n = target_north - north
-        error_e = target_east - east
-        error_z = target_alt - alt
-        
-        # 3D Straight Line Distance
-        dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
-        
-        # Desired Heading (The angle to the target)
-        desired_yaw = np.arctan2(error_e, error_n)
-        heading_error = np.arctan2(np.sin(desired_yaw - yaw), np.cos(desired_yaw - yaw))
+        # Reward for progress (pos if closer, neg if further)
+        reward_prog = (self.previous_dist - dist_3d) * 1.0
 
-        # --- Reward Components ---
+        # Alignment reward
+        target_north = self.target_pos[0] - north
+        target_east = self.target_pos[1] - east
+        desired_yaw = np.arctan2(target_east, target_north)
 
-        # Distance Penalty (Aggressive, and linear to negate staying still)
-        reward_dist = -(dist_3d / 1000.0) 
+        yaw_error = ((desired_yaw - yaw) + np.pi) % (2 * np.pi) - np.pi
+        reward_heading = np.cos(yaw_error) * 0.5
 
-        # Heading Reward, encourage looking at taget
-        reward_heading = np.cos(heading_error) * 1.0
+        # Reward for staying alive
+        reward_alive = 0.1
 
-        # Altitude Incentive
-        reward_alt = 0.0
-        if alt < target_alt:
-            if pitch > 0.05: 
-                reward_alt = pitch * 2.0
-        
-        # --- Penalties ---
-        penalty_action = np.sum(np.square(action)) * 0.1
-        
-        penalty_stability = 0.0
-        
-        if alt < (target_alt - 100) and pitch < -0.1:
-            penalty_stability += abs(pitch) * 2.0
+        # Small penalties
+        reward_action = -np.sum(np.square(action)) * 0.05
 
-        if abs(roll) > 0.78: 
-            penalty_stability += abs(roll) * 1.0
-        
-        # --- TOTAL ---
-        
-        # Reward only gets close to zero as plane gets very close to target
-        total_reward = reward_dist + reward_heading + reward_alt - penalty_stability - penalty_action
+        reward_stab = 0.0
+        if abs(roll) > 1.0:
+            reward_stab -= 0.1
+
+        # Large rewards
+        if terminated:
+            if dist_3d < 100.0:
+                return 1000.0
+            else:
+                return -100.0 # Crash
+       
+        total_reward = reward_prog + reward_heading + reward_alive + reward_action + reward_stab
+        self.previous_dist = dist_3d
         
         return float(total_reward)
     
@@ -150,20 +139,25 @@ class FlightEnvironment(gym.Env):
         # 3. Pull new observations
         observation = self._get_obs()
         
-        # 4. Reward Logic (Use your existing calc_reward function)
-        reward = self.calc_reward(observation, action)
+        # 4. Termination logic
+        terminated = False
+        truncated = False
 
-        # 5. Check Success/Failure
-        terminated = self.check_termination(observation)
-        
-        # Check distance to waypoint for success bonus
-        dist_3d = np.sqrt((5000-observation[0])**2 + (5000-observation[1])**2 + (3000-observation[2])**2)
-        if dist_3d < 50.0:
+        if observation[2] < 0 or observation[2] > self.max_altitude:
+            terminated = True # Crashed or too high
+
+        if abs(observation[3]) > (np.pi / 2) or abs(observation[4]) > (np.pi / 2):
+            terminated = True # Upside down check
+
+        dist_3d = np.linalg.norm(self.target_pos - observation[:3])
+        if dist_3d < 100.0:
             terminated = True
-            reward += 1000.0
-            print(f"Target Reached!")
-
+            print(f"Target Reached! Distance: {dist_3d:.1f} ft")
+        
         truncated = self.current_step >= self.max_steps
+
+        # 5. Reward Logic
+        reward = self.calc_reward(observation, action, terminated)
         
         return observation, float(reward), terminated, truncated, {}
     
@@ -175,4 +169,7 @@ class FlightEnvironment(gym.Env):
         self.model.Thesis_C___initialize()
         
         observation = self._get_obs()
+
+        self.prev_dist = np.linalg.norm(self.target_pos - observation[:3])
+
         return observation, {}
