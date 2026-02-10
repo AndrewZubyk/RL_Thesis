@@ -12,7 +12,7 @@ from wrapper.flight_wrapper import flight_wrapper
 
 # --- CONFIGURATION ---
 # Path to your trained model (Adjust filename if needed)
-MODEL_PATH = "./HPC_Results/Run1/models/models/sac_final.zip"
+MODEL_PATH = "./HPC_Results/Run2/models/sac_flight_model_1250000_steps.zip"
 # MODEL_PATH = "./models/sac_flight_model_250000_steps.zip" # Or use a specific checkpoint
 
 # Waypoint definition

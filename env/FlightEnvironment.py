@@ -32,17 +32,26 @@ class FlightEnvironment(gym.Env):
         # ... rest of setup ...
         self.target_pos = np.array([5000.0, 5000.0, 3000.0], dtype=np.float32)
         self.max_altitude = 10000.0
-        self.max_steps = 2000
+        self.max_steps = 15000
         self.current_step = 0
 
         self.prev_dist = 0.0
         
         # ... observation/action spaces ...
         # theta, phi, psi, p, q, r, north, east, alt
-        obs_low = np.array([-20000.0]*9, dtype=np.float32)
-        obs_high = np.array([20000.0]*9, dtype=np.float32)
-        self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+
+        # 1. Action Space: Always normalized (-1.0 to 1.0)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+
+        # 2. Observation Space: [Roll, Pitch, Yaw, P, Q, R, North, East, Alt]
+        # Angles = +/- Pi (3.14), Rates = +/- 10 rad/s, Position = Infinite
+        high = np.array([np.pi]*3 + [10.0]*3 + [np.inf]*3, dtype=np.float32)
+        
+        # Define Low bounds (Symmetric, except Altitude starts at 0)
+        low = -high
+        low[8] = 0.0 
+        
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
     def _get_obs(self):
         """Helper to pull 9 observations from the C++ memory."""
@@ -75,7 +84,7 @@ class FlightEnvironment(gym.Env):
         dist_3d = np.linalg.norm(self.target_pos - current_pos)
 
         # Reward for progress (pos if closer, neg if further)
-        reward_prog = (self.previous_dist - dist_3d) * 1.0
+        reward_prog = (self.prev_dist - dist_3d) * 1.0
 
         # Alignment reward
         target_north = self.target_pos[0] - north
@@ -103,8 +112,8 @@ class FlightEnvironment(gym.Env):
                 return -100.0 # Crash
        
         total_reward = reward_prog + reward_heading + reward_alive + reward_action + reward_stab
-        self.previous_dist = dist_3d
-        
+        self.prev_dist = dist_3d
+
         return float(total_reward)
     
     def check_termination(self, observation):
@@ -127,8 +136,13 @@ class FlightEnvironment(gym.Env):
     def step(self, action):
         self.current_step += 1
 
+        scaled_action = action * np.array([30.0, 30.0, 30.0, 1.0])
+    
+        # Fix Throttle: Map [-1, 1] to [0, 1]
+        scaled_action[3] = (action[3] + 1) / 2
+
         # 1. Inject actions into C++ model
-        action_data = np.array(action, dtype=np.float64)
+        action_data = np.array(scaled_action, dtype=np.float64)
         # Cast to pointer
         action_ptr = action_data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         self.model.set_inputs(action_ptr)
