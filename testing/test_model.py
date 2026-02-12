@@ -1,83 +1,96 @@
-import os
-import sys
-import numpy as np
+import gymnasium as gym
 from stable_baselines3 import SAC
+import numpy as np
+import sys
+import os
+import math
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from env.FlightEnvironment import FlightEnvironment
-from wrapper.flight_wrapper import flight_wrapper
+# IMPORT THE MONITOR LOGIC DIRECTLY
+from monitoring.runtime_monitor import apply_runtime 
 
 # --- CONFIGURATION ---
-# Path to your trained model (Adjust filename if needed)
-MODEL_PATH = "./HPC_Results/Run2/models/sac_flight_model_1250000_steps.zip"
-# MODEL_PATH = "./models/sac_flight_model_250000_steps.zip" # Or use a specific checkpoint
+MODEL_PATH = "./HPC_Results/Run3/models/sac_flight_model_5250000_steps.zip"
+# MODEL_PATH = "./HPC_Results/Run3/models/sac_final.zip"
+MAX_STEPS = 15000
 
-# Waypoint definition
-TARGET_NORTH = 5000.0
-TARGET_EAST  = 5000.0 
-TARGET_ALT   = 3000.0
-
-def run_test():
-    # Same wrapper setup as training
-    try:
-        raw_env = FlightEnvironment()
-    except ConnectionRefusedError:
-        print("Error: Could not connect to Simulink. Is the simulation running?")
-        sys.exit()
-
-    env = flight_wrapper(raw_env)
-
-    # Load the Model
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model file not found at {MODEL_PATH}")
-        print("Check your folder path or filename.")
-        sys.exit()
-
-    print(f"Loading model from: {MODEL_PATH}")
-    model = SAC.load(MODEL_PATH)
-
-    # Start the Replay Loop
-    print("\n--- Starting Replay (Press Ctrl+C to stop) ---")
-    obs, _ = env.reset()
+def run_debug_test():
+    env = FlightEnvironment()
+    env.max_steps = MAX_STEPS 
     
-    # Run for 4000 steps (approx 40 seconds)
-    for i in range(4000):
-        # deterministic=True for best action
-        action, _states = model.predict(obs, deterministic=True)
+    print(f"Loading model: {MODEL_PATH}")
+    model = SAC.load(MODEL_PATH)
+    
+    # Renamed 'obs' to 'observation'
+    observation, _ = env.reset()
+    done = False
+    step = 0
+    interventions = 0
+    
+    print("\n--- TEST START: WATCHING FLIGHT PATH ---")
+    # Added Pitch column to the header
+    print(f"{'Step':<6} | {'Alt (ft)':<10} | {'Dist (ft)':<10} | {'Roll (deg)':<10} | {'Pitch (deg)':<10} | {'Action Status'}")
+    print("-" * 80)
+    
+    try:
+        while not done:
+            # 1. Agent Prediction
+            original_action, _ = model.predict(observation, deterministic=True)
+            
+            # 2. Runtime Monitor Check
+            safe_action = apply_runtime(original_action, observation)
+            
+            # 3. Check for Intervention
+            is_intervention = False
+            if not np.allclose(original_action, safe_action, atol=1e-5):
+                interventions += 1
+                is_intervention = True
+
+            # 4. Execute Step
+            observation, reward, terminated, truncated, info = env.step(safe_action)
+            
+            # 5. LOGGING (Every 10 steps OR if intervention happens)
+            if step % 10 == 0 or is_intervention:
+                alt = observation[2]
+                dist = np.linalg.norm(env.target_pos - observation[:3])
+                
+                # Calculate angles
+                roll_deg = math.degrees(observation[3])
+                pitch_deg = math.degrees(observation[4]) # Pitch is index 4
+                
+                status = "NORMAL"
+                if is_intervention:
+                    status = "!!! MONITOR TRIGGERED !!!"
+                
+                print(f"{step:<6d} | {alt:<10.1f} | {dist:<10.1f} | {roll_deg:<10.1f} | {pitch_deg:<10.1f} | {status}")
+                
+                # If triggered, show details on next line
+                if is_intervention:
+                    print(f"       > Agent: {np.round(original_action, 3)}")
+                    print(f"       > Safe:  {np.round(safe_action, 3)}")
+
+            done = terminated or truncated
+            step += 1
+
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
         
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # --- FEEDBACK CALCULATIONS ---
-        # Extract current position (Verify these indices match your Simulink output!)
-        # Assuming: [North, East, Alt, ...]
-        north = obs[0]
-        east  = obs[1]
-        alt   = obs[2]
-        
-        # Calculate Distance to Target
-        error_n = TARGET_NORTH - north
-        error_e = TARGET_EAST - east
-        error_z = TARGET_ALT - alt
-        dist_3d = np.sqrt(error_n**2 + error_e**2 + error_z**2)
-
-        # Print Status every 10 steps
-        if i % 10 == 0:
-            print(f"Step: {i:4d} | Alt: {alt:6.1f} ft | Dist to Target: {dist_3d:6.1f} ft | Reward: {reward:6.2f}")
-
-        # Success Condition if within 200 ft of target
-        if dist_3d < 200.0:
-            print(f"\n*** SUCCESS! Target reached at Step {i} ***")
-            break
-
-        if terminated or truncated:
-            print("\nEpisode Finished (Crash or Timeout). Resetting...")
-            obs, _ = env.reset()
-            break
-
-    print("Test run complete.")
+    print("-" * 80)
+    print("--- RESULTS ---")
+    print(f"Total Steps Flown: {step}")
+    print(f"Total Safety Interventions: {interventions}")
+    print(f"Final Altitude: {observation[2]:.1f} ft")
+    
+    if observation[2] > 0 and step >= 1000:
+        print("RESULT: SUCCESS - Plane flew stable!")
+    elif observation[2] <= 0:
+        print("RESULT: CRASH - Altitude hit 0.")
+    else:
+        print("RESULT: TIMEOUT/OTHER - Ended early.")
 
 if __name__ == "__main__":
-    run_test()
+    run_debug_test()

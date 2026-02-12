@@ -38,7 +38,8 @@ class FlightEnvironment(gym.Env):
         self.prev_dist = 0.0
         
         # ... observation/action spaces ...
-        # theta, phi, psi, p, q, r, north, east, alt
+        # North, East, Down, Phi, Theta, Psi, TAS, 0, -1
+        # Elevator, Aileron, Rudder, Throttle
 
         # 1. Action Space: Always normalized (-1.0 to 1.0)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
@@ -72,48 +73,62 @@ class FlightEnvironment(gym.Env):
         3. Stability/Action Penalties
         '''
         
+        # EXTRACT VARIABLES
         north = observation[0]
         east  = observation[1]
         alt   = observation[2]
         roll  = observation[3]
         pitch = observation[4]
-        yaw   = observation[5] 
+        yaw   = observation[5]
         
-        # Calculate distance
+        # CALCULATE DISTANCE
+        # Current 3D position
         current_pos = np.array([north, east, alt])
         dist_3d = np.linalg.norm(self.target_pos - current_pos)
 
-        # Reward for progress (pos if closer, neg if further)
-        reward_prog = (self.prev_dist - dist_3d) * 1.0
+        # CALCULATE PROGRESS (The "Distance Reward")
+        delta_dist = self.prev_dist - dist_3d
+        
+        # SAFETY CLIP: Limit the reward to +/- 10.0 per step.
+        reward_prog = np.clip(delta_dist * 1.0, -10.0, 10.0)
 
-        # Alignment reward
+        # ALIGNMENT REWARD (Heading)
+        # Vector to target
         target_north = self.target_pos[0] - north
-        target_east = self.target_pos[1] - east
+        target_east  = self.target_pos[1] - east
+        
+        # Desired Yaw
         desired_yaw = np.arctan2(target_east, target_north)
 
+        # Yaw Error
         yaw_error = ((desired_yaw - yaw) + np.pi) % (2 * np.pi) - np.pi
+        
+        # Reward: +0.5 if facing target, -0.5 if facing away
         reward_heading = np.cos(yaw_error) * 0.5
 
-        # Reward for staying alive
+        # SURVIVAL & PENALTIES
         reward_alive = 0.1
-
-        # Small penalties
+        
+        # Action Penalty
         reward_action = -np.sum(np.square(action)) * 0.05
 
+        # Stability Penalty
         reward_stab = 0.0
-        if abs(roll) > 1.0:
+        if abs(roll) > 1.5: 
             reward_stab -= 0.1
-
-        # Large rewards
+            
+        # TERMINAL REWARDS
         if terminated:
             if dist_3d < 100.0:
-                return 1000.0
+                return 1000.0 # Success
             else:
                 return -100.0 # Crash
-       
-        total_reward = reward_prog + reward_heading + reward_alive + reward_action + reward_stab
+
         self.prev_dist = dist_3d
 
+        # TOTAL
+        total_reward = reward_prog + reward_heading + reward_alive + reward_action + reward_stab
+        
         return float(total_reward)
     
     def check_termination(self, observation):
@@ -177,11 +192,9 @@ class FlightEnvironment(gym.Env):
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        
         self.current_step = 0
-        
-        # Call the C++ initialize function to reset physics to 1000ft
         self.model.Thesis_C___initialize()
-        
         observation = self._get_obs()
 
         self.prev_dist = np.linalg.norm(self.target_pos - observation[:3])

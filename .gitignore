@@ -13,3 +13,5 @@ HPC_Results/
 # Ignore python bytecode
 *.pyc
 __pycache__/
+env/__pycache__/FlightEnvironment.cpython-313.pyc
+monitoring/__pycache__/runtime_monitor.cpython-313.pyc
