@@ -149,46 +149,67 @@ class FlightEnvironment(gym.Env):
         return False
 
     def step(self, action):
-        self.current_step += 1
-
-        scaled_action = action * np.array([30.0, 30.0, 30.0, 1.0])
-    
-        # Fix Throttle: Map [-1, 1] to [0, 1]
-        scaled_action[3] = (action[3] + 1) / 2
-
-        # 1. Inject actions into C++ model
-        action_data = np.array(scaled_action, dtype=np.float64)
-        # Cast to pointer
-        action_ptr = action_data.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        self.model.set_inputs(action_ptr)
-
-        # 2. Run physics
-        self.model.Thesis_C___step()
-
-        # 3. Pull new observations
-        observation = self._get_obs()
+        # Mapping: [Elevator, Aileron, Rudder, Throttle]
         
-        # 4. Termination logic
+        # Pitch (Elevator): Limit to +/- 20 deg deflection
+        elevator_cmd = action[0] * 20.0 
+        
+        # Roll (Aileron): Limit to +/- 15 deg deflection
+        aileron_cmd  = action[1] * 15.0 
+        
+        # Yaw (Rudder): Limit to +/- 20 deg
+        rudder_cmd   = action[2] * 20.0 
+        
+        # Throttle: 0% to 100%
+        throttle_cmd = (action[3] + 1.0) / 2.0 
+
+        self.model.Thesis_C___set_controls(elevator_cmd, aileron_cmd, rudder_cmd, throttle_cmd)
+        
+        self.model.Thesis_C___step()
+        self.current_step += 1
+        
+        obs = self._get_obs()
+        
+        # Extract Attitude for Limits
+        # obs structure: [North, East, Alt, Roll, Pitch, Yaw...]
+        roll_rad  = obs[3]
+        pitch_rad = obs[4]
+        
+        roll_deg  = np.degrees(roll_rad)
+        pitch_deg = np.degrees(pitch_rad)
+
         terminated = False
         truncated = False
+        reward = 0.0
 
-        if observation[2] < 0 or observation[2] > self.max_altitude:
-            terminated = True # Crashed or too high
-
-        if abs(observation[3]) > (np.pi / 2) or abs(observation[4]) > (np.pi / 2):
-            terminated = True # Upside down check
-
-        dist_3d = np.linalg.norm(self.target_pos - observation[:3])
-        if dist_3d < 100.0:
+        # CONSTRAINT 1: Altitude (Ground Collision)
+        if obs[2] <= 0.0:
             terminated = True
-            print(f"Target Reached! Distance: {dist_3d:.1f} ft")
+            reward = -100.0
         
-        truncated = self.current_step >= self.max_steps
+        # CONSTRAINT 2: Pitch Limit (Max 25 deg)
+        elif abs(pitch_deg) > 25.0:
+            terminated = True
+            reward = -50.0
+            
+        # CONSTRAINT 3: Roll Limit (Max 20 deg)
+        elif abs(roll_deg) > 20.0:
+            terminated = True
+            reward = -50.0 
 
-        # 5. Reward Logic
-        reward = self.calc_reward(observation, action, terminated)
-        
-        return observation, float(reward), terminated, truncated, {}
+        # CONSTRAINT 4: Target Reached
+        elif self._is_target_reached(obs):
+            terminated = True
+            reward = 1000.0
+
+        # CONSTRAINT 5: Timeout
+        elif self.current_step >= self.max_steps:
+            truncated = True
+
+        if not terminated:
+            reward = self.calc_reward(obs, action, terminated)
+
+        return obs, reward, terminated, truncated, {}
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

@@ -27,7 +27,7 @@ def apply_runtime(action, observation):
     ALT_SOFT = 300.0    # Start nudging up
     ALT_HARD = 50.0     # Panic floor
     
-    ROLL_LIMIT = np.deg2rad(60)
+    ROLL_LIMIT = np.deg2rad(15)
     ROLL_KP = 1.5
     
     PITCH_MIN = np.deg2rad(-20) # Max dive
