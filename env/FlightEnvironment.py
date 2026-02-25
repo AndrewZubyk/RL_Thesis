@@ -46,11 +46,8 @@ class FlightEnvironment(gym.Env):
 
         # 2. Observation Space: [Roll, Pitch, Yaw, P, Q, R, North, East, Alt]
         # Angles = +/- Pi (3.14), Rates = +/- 10 rad/s, Position = Infinite
-        high = np.array([np.pi]*3 + [10.0]*3 + [np.inf]*3, dtype=np.float32)
-        
-        # Define Low bounds (Symmetric, except Altitude starts at 0)
-        low = -high
-        low[8] = 0.0 
+        high = np.array([10000.0, 10000.0, 10000.0, np.pi, np.pi, np.pi, 10.0, 10.0, 10.0], dtype=np.float32)
+        low  = np.array([-10000.0, -10000.0, 0.0, -np.pi, -np.pi, -np.pi, -10.0, -10.0, -10.0], dtype=np.float32)
         
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
@@ -73,7 +70,7 @@ class FlightEnvironment(gym.Env):
         3. Stability/Action Penalties
         '''
         
-        # EXTRACT VARIABLES
+        # Variable Setup
         north = observation[0]
         east  = observation[1]
         alt   = observation[2]
@@ -81,53 +78,45 @@ class FlightEnvironment(gym.Env):
         pitch = observation[4]
         yaw   = observation[5]
         
-        # CALCULATE DISTANCE
-        # Current 3D position
+        # Calc Distance
         current_pos = np.array([north, east, alt])
         dist_3d = np.linalg.norm(self.target_pos - current_pos)
 
-        # CALCULATE PROGRESS (The "Distance Reward")
+        # Distance Reward
         delta_dist = self.prev_dist - dist_3d
-        
-        # SAFETY CLIP: Limit the reward to +/- 10.0 per step.
-        reward_prog = np.clip(delta_dist * 1.0, -10.0, 10.0)
+        reward_prog = delta_dist * 0.5
 
-        # ALIGNMENT REWARD (Heading)
-        # Vector to target
-        target_north = self.target_pos[0] - north
-        target_east  = self.target_pos[1] - east
-        
-        # Desired Yaw
-        desired_yaw = np.arctan2(target_east, target_north)
+        # Directional rewards
+        target_vector = self.target_pos[:2] - np.array([north, east])
+        desired_yaw = np.arctan2(target_vector[1], target_vector[0])
+        yaw_error = abs(((desired_yaw - yaw) + np.pi) % (2 * np.pi) - np.pi)
 
-        # Yaw Error
-        yaw_error = ((desired_yaw - yaw) + np.pi) % (2 * np.pi) - np.pi
-        
-        # Reward: +0.5 if facing target, -0.5 if facing away
-        reward_heading = np.cos(yaw_error) * 0.5
+        # Penalty for facing wrong way
+        reward_heading = np.cos(yaw_error) * 2.0
 
-        # SURVIVAL & PENALTIES
-        reward_alive = 0.1
-        
-        # Action Penalty
-        reward_action = -np.sum(np.square(action)) * 0.05
+        # Safety & Stability Penalties
+        reward_alt = 0.0
+        if alt < 500.0:
+            reward_alt = -((500.0 - alt) / 500.0)
 
-        # Stability Penalty
         reward_stab = 0.0
-        if abs(roll) > 1.5: 
-            reward_stab -= 0.1
-            
-        # TERMINAL REWARDS
+        if abs(roll) > np.deg2rad(30):
+            reward_stab -= 0.5
+        if abs(pitch) > np.deg2rad(20):
+            reward_stab -= 0.5
+
+        # Terminal Rewards
         if terminated:
             if dist_3d < 100.0:
-                return 1000.0 # Success
+                return 5000.0 #huge for reaching waypoint
+            elif alt <= 0.0:
+                return -2000.0 # Heavy for crashing
             else:
-                return -100.0 # Crash
-
+                return -500.0 # OOB or Upside down
+            
         self.prev_dist = dist_3d
 
-        # TOTAL
-        total_reward = reward_prog + reward_heading + reward_alive + reward_action + reward_stab
+        total_reward = reward_prog + reward_heading + reward_alt + reward_stab + 0.1
         
         return float(total_reward)
     
@@ -151,20 +140,6 @@ class FlightEnvironment(gym.Env):
     def step(self, action):
         # Mapping: [Elevator, Aileron, Rudder, Throttle]
         
-        # Pitch (Elevator): Limit to +/- 20 deg deflection
-        elevator_cmd = action[0] * 20.0 
-        
-        # Roll (Aileron): Limit to +/- 15 deg deflection
-        aileron_cmd  = action[1] * 15.0 
-        
-        # Yaw (Rudder): Limit to +/- 20 deg
-        rudder_cmd   = action[2] * 20.0 
-        
-        # Throttle: 0% to 100%
-        throttle_cmd = (action[3] + 1.0) / 2.0 
-
-        self.model.Thesis_C___set_controls(elevator_cmd, aileron_cmd, rudder_cmd, throttle_cmd)
-        
         self.model.Thesis_C___step()
         self.current_step += 1
         
@@ -182,6 +157,9 @@ class FlightEnvironment(gym.Env):
         truncated = False
         reward = 0.0
 
+        current_pos = obs[:3]
+        dist_3d = np.linalg.norm(self.target_pos - current_pos)
+
         # CONSTRAINT 1: Altitude (Ground Collision)
         if obs[2] <= 0.0:
             terminated = True
@@ -198,9 +176,9 @@ class FlightEnvironment(gym.Env):
             reward = -50.0 
 
         # CONSTRAINT 4: Target Reached
-        elif self._is_target_reached(obs):
+        elif dist_3d < 100.0:
             terminated = True
-            reward = 1000.0
+            reward = 1000.0 # Big Success Reward!
 
         # CONSTRAINT 5: Timeout
         elif self.current_step >= self.max_steps:

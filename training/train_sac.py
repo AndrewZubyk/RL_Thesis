@@ -45,7 +45,7 @@ def train_with_runtime_monitoring():
         print(f"An unexpected error occurred: {e}")
         return
     
-    env = flight_wrapper(raw_env)
+    env = raw_env
 
     # Initialize the SAC model
     model = SAC(
