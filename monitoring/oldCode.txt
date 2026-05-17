@@ -1,0 +1,87 @@
+import numpy as np
+
+def apply_runtime(action, observation):
+    """
+    Applies proportional runtime monitoring (envelope protection) to flight controls.
+    Action: [Elevator, Aileron, Rudder, Throttle]
+    Observation: [North, East, Alt, Roll, Pitch, Yaw...]
+    """
+    
+    # 1. Extract Observations and CONVERT TO DEGREES
+    alt = observation[2]
+    roll_deg = np.degrees(observation[3])
+    pitch_deg = np.degrees(observation[4])
+    
+    # Start with the agent's intended action
+    safe_action = np.copy(action)
+    triggered = False
+
+    # --- ENVELOPE PROTECTION 1: GROUND AVOIDANCE ---
+    soft_alt_limit = 500.0
+    hard_alt_limit = 100.0
+    
+    if alt < soft_alt_limit:
+        triggered = True
+        # Calculate how close we are to the hard limit (0.0 to 1.0)
+        danger_ratio = max(0.0, min(1.0, (soft_alt_limit - alt) / (soft_alt_limit - hard_alt_limit)))
+        
+        # Override Elevator: Force negative (pull up) proportionally
+        # If danger_ratio is 1.0 (at hard limit), force full -1.0 elevator
+        safe_action[0] = min(safe_action[0], -1.0 * danger_ratio)
+        
+        # Override Throttle: Force positive (power up) proportionally
+        safe_action[3] = max(safe_action[3], 1.0 * danger_ratio)
+
+    # --- ENVELOPE PROTECTION 2: PITCH LIMITER ---
+    # Only apply pitch correction if we aren't already fighting a ground collision
+    if not triggered:
+        max_pitch = 20.0
+        min_pitch = -15.0 # Tighter than the -20 crash limit
+        
+        if pitch_deg > max_pitch:
+            triggered = True
+            # Plane is pitched up too high. Apply positive elevator to push nose down.
+            danger_ratio = min(1.0, (pitch_deg - max_pitch) / 3.0) 
+            safe_action[0] = max(safe_action[0], 1.0 * danger_ratio)
+            
+        elif pitch_deg < min_pitch:
+            triggered = True
+            # Plane is pitched down too low. Apply negative elevator to pull nose up.
+            danger_ratio = min(1.0, (min_pitch - pitch_deg) / 3.0)
+            safe_action[0] = min(safe_action[0], -1.0 * danger_ratio)
+
+    # --- ENVELOPE PROTECTION 3: BANK LIMITER ---
+    max_bank = 15.0
+    
+    if abs(roll_deg) > max_bank:
+        triggered = True
+        # Plane is banking too hard. Apply opposite aileron to level wings.
+        danger_ratio = min(1.0, (abs(roll_deg) - max_bank) / 3.0)
+        
+        if roll_deg > 0: # Banking right
+            safe_action[1] = min(safe_action[1], -1.0 * danger_ratio) # Roll left
+        else: # Banking left
+            safe_action[1] = max(safe_action[1], 1.0 * danger_ratio) # Roll right
+        
+        safe_action[3] = min(safe_action[3], 1.0 - danger_ratio)
+    
+    # 2D. Anti-Spin / Stall Recovery
+    safe_action[2] = np.clip(safe_action[2], -0.3, 0.3)
+    if abs(roll_deg) > max_bank:
+        # Prevent pulling UP (negative elevator) which causes stalls during banks.
+        # But ALLOW pushing DOWN (positive elevator) so the plane can recover!
+        if safe_action[0] < 0.0:
+            safe_action[0] = 0.0 
+            
+        safe_action[2] = 0.0
+        triggered = True
+
+    # Clip the final safe action to ensure it stays within valid [-1.0, 1.0] bounds
+    safe_action = np.clip(safe_action, -1.0, 1.0)
+
+    if triggered:
+        print(f"!!! MONITOR TRIGGERED !!!")
+        print(f"   > Agent: {np.round(action, 3)}")
+        print(f"   > Safe:  {np.round(safe_action, 3)}")
+
+    return safe_action

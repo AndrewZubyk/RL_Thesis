@@ -2,85 +2,61 @@ import numpy as np
 
 def apply_runtime(action, observation):
     """
-    PROPORTIONAL Runtime Monitor (Corrected Action Indices)
-    
-    Action Space:
-    0: Elevator (Pitch)
-    1: Aileron  (Roll)
-    2: Rudder   (Yaw)
-    3: Throttle (Power)
-    
-    Observation Space:
-    [North, East, Alt, Roll, Pitch, Yaw...]
-      0      1     2    3     4      5
+    Applies proportional runtime monitoring (envelope protection) to flight controls.
+    Action: [Elevator, Aileron, Rudder, Throttle]
     """
+    alt = observation[2]
+    roll_deg = np.degrees(observation[3])
+    pitch_deg = np.degrees(observation[4])
     
-    # 1. Setup
-    safe_action = np.array(action, copy=True)
-    
-    # 2. Extract State (Corrected Observation Indices)
-    alt   = observation[2]  # Altitude (ft)
-    roll  = observation[3]  # Radians
-    pitch = observation[4]  # Radians
-    
-    # 3. Define Safe Limits
-    ALT_SOFT = 300.0    # Start nudging up
-    ALT_HARD = 50.0     # Panic floor
-    
-    ROLL_LIMIT = np.deg2rad(15)
-    ROLL_KP = 1.5
-    
-    PITCH_MIN = np.deg2rad(-20) # Max dive
-    PITCH_MAX = np.deg2rad(25)  # Max climb
-    PITCH_KP = 2.0
+    safe_action = np.copy(action)
+    triggered = False
 
-    # --- LOGIC 1: GROUND AVOIDANCE ---
-    if alt < ALT_SOFT:
-        # Calculate Danger (0.0 to 1.0)
-        if alt <= ALT_HARD:
-            danger = 1.0
-        else:
-            danger = (ALT_SOFT - alt) / (ALT_SOFT - ALT_HARD)
+    # --- EP1: GROUND AVOIDANCE ---
+    soft_alt_limit = 500.0
+    hard_alt_limit = 100.0
+    
+    if alt < soft_alt_limit:
+        triggered = True
+        danger_ratio = max(0.0, min(1.0, (soft_alt_limit - alt) / (soft_alt_limit - hard_alt_limit)))
+        safe_action[0] = min(safe_action[0], -1.0 * danger_ratio)
+        safe_action[3] = max(safe_action[3], 1.0 * danger_ratio)
+
+    # --- EP2: PITCH LIMITER ---
+    if not triggered:
+        max_pitch = 35.0  # Widened to allow normal climbs
+        min_pitch = -25.0 # Widened to allow normal descents
         
-        # A. Force Throttle Up (Index 3)
-        # If danger is high, force throttle to at least 50-100%
-        safe_action[3] = max(safe_action[3], -0.5 + (1.5 * danger))
-        
-        # B. Pull Up (Index 0 - ELEVATOR)
-        # Negative Elevator = Pitch Up
-        elevator_fix = -1.0 * danger
-        safe_action[0] += elevator_fix
-
-        # C. Level Wings (Index 1 - AILERON)
-        # Reduce banking authority when low to prevent wing strikes
-        safe_action[1] *= (1.0 - danger)
-
-    # --- LOGIC 2: BANK LIMITER ---
-    # Fixes Action Index 1 (Aileron)
-    if roll > ROLL_LIMIT:
-        excess = roll - ROLL_LIMIT
-        # Roll Left (Negative Aileron)
-        safe_action[1] -= (excess * ROLL_KP)
-        
-    elif roll < -ROLL_LIMIT:
-        excess = roll - (-ROLL_LIMIT)
-        # Roll Right (Positive Aileron)
-        safe_action[1] -= (excess * ROLL_KP)
-
-    # --- LOGIC 3: PITCH LIMITER ---
-    # Fixes Action Index 0 (Elevator)
-    if alt > ALT_SOFT:
-        if pitch > PITCH_MAX: # Nose too high
-            excess = pitch - PITCH_MAX
-            # Push Down (Positive Elevator)
-            safe_action[0] += (excess * PITCH_KP)
+        if pitch_deg > max_pitch:
+            triggered = True
+            # Divisor is 10.0: Ramps up smoothly over 10 degrees instead of instantly
+            danger_ratio = min(1.0, (pitch_deg - max_pitch) / 10.0) 
+            safe_action[0] = max(safe_action[0], 1.0 * danger_ratio)
             
-        elif pitch < PITCH_MIN: # Nose too low
-            excess = pitch - PITCH_MIN
-            # Pull Up (Negative Elevator)
-            safe_action[0] += (excess * PITCH_KP)
+        elif pitch_deg < min_pitch:
+            triggered = True
+            danger_ratio = min(1.0, (min_pitch - pitch_deg) / 10.0)
+            safe_action[0] = min(safe_action[0], -1.0 * danger_ratio)
 
-    # --- FINAL CLEANUP ---
+    # --- EP3: BANK LIMITER ---
+    max_bank = 45.0 # Widened significantly! 15 degrees was way too tight for RL.
+    
+    if abs(roll_deg) > max_bank:
+        triggered = True
+        # Ramps up smoothly between 45 and 55 degrees
+        danger_ratio = min(1.0, (abs(roll_deg) - max_bank) / 10.0)
+        
+        if roll_deg > 0: 
+            safe_action[1] = min(safe_action[1], -1.0 * danger_ratio)
+        else: 
+            safe_action[1] = max(safe_action[1], 1.0 * danger_ratio) 
+
+    # Clean and return
     safe_action = np.clip(safe_action, -1.0, 1.0)
+
+    if triggered:
+        print(f"!!! MONITOR TRIGGERED !!!")
+        print(f"   > Agent: {np.round(action, 3)}")
+        print(f"   > Safe:  {np.round(safe_action, 3)}")
 
     return safe_action

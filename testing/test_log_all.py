@@ -7,6 +7,8 @@ import glob
 import re
 import sys
 
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
 # --- SETUP PATHS ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -15,8 +17,8 @@ sys.path.append(parent_dir)
 from env.FlightEnvironment import FlightEnvironment
 
 # Folder containing your .zip files
-MODELS_DIR = "./HPC_Results/Run3/models"
-OUTPUT_CSV = "./HPC_Results/Run3/benchmark_results.csv"
+MODELS_DIR = "./HPC_Results/Run7/models"
+OUTPUT_CSV = "./HPC_Results/Run7/benchmark_results.csv"
 
 def extract_step_count(filename):
     match = re.search(r"(\d+)_steps", filename)
@@ -26,31 +28,41 @@ def extract_step_count(filename):
 
 def evaluate_model(model_path, env):
     try:
-        model = SAC.load(model_path)
+        model = SAC.load(model_path, env=env)
     except Exception as e:
         print(f"FAILED to load {model_path}: {e}")
         return None
 
-    obs, _ = env.reset()
+    obs = env.reset()
+
+    base_env = env.envs[0].unwrapped
+
     done = False
     total_reward = 0
     steps = 0
+
+    final_alt = 0.0
+    final_dist = 0.0
     
     while not done:
         action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        total_reward += reward
-        steps += 1
-        done = terminated or truncated
+        obs, reward, done_array, info = env.step(action)
 
-    # --- CRITICAL UPDATE: CAPTURE FINAL ALTITUDE ---
-    final_alt = obs[2]  # Index 2 is Altitude
-    final_dist = np.linalg.norm(env.target_pos - obs[:3])
+        total_reward += reward[0]
+        steps += 1
+        done = done_array[0]
+
+        if done:
+            term_obs = info[0].get('terminal_observation')
+            if term_obs is not None:
+                raw_obs = env.unnormalize_obs(term_obs)
+                final_alt = raw_obs[2]
+                final_dist = np.linalg.norm(base_env.target_pos - raw_obs[:3])
     
     status = "CRASH"
     if final_alt > 0 and final_dist < 100:
         status = "SUCCESS"
-    elif final_alt > 0 and steps >= env.max_steps:
+    elif final_alt > 0 and steps >= base_env.max_steps:
         status = "TIMEOUT"
         
     return {
@@ -80,7 +92,20 @@ def main():
     print("-" * 85)
 
     results = []
-    env = FlightEnvironment()
+    # env = FlightEnvironment()
+
+    pkl_files = glob.glob(os.path.join(MODELS_DIR, "*.pkl"))
+    normalize_pkl = pkl_files[0]
+
+    def make_env ():
+        return FlightEnvironment()
+    
+    vec_env = DummyVecEnv([make_env])
+
+    env = VecNormalize.load(normalize_pkl, vec_env)
+
+    env.training = False
+    env.norm_reward = False
 
     for model_path in model_files:
         stats = evaluate_model(model_path, env)

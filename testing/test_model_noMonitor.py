@@ -6,7 +6,6 @@ import math
 import glob
 import csv, time, psutil, threading
 
-
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3 import SAC
 from datetime import datetime
@@ -16,8 +15,6 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from env.FlightEnvironment import FlightEnvironment
-# IMPORT THE MONITOR LOGIC DIRECTLY
-from monitoring.runtime_monitor import apply_runtime 
 
 # --- CONFIGURATION ---
 # for run6 we run 9.5 million
@@ -29,7 +26,7 @@ MAX_STEPS = 1000000
 
 stop_monitor = threading.Event()
 
-def run_debug_test():
+def run_baseline_test():
     def make_env():
         return FlightEnvironment()
     
@@ -46,20 +43,18 @@ def run_debug_test():
 
     base_env = env.envs[0].unwrapped
 
-    print(f"Loading model from: {MODEL_PATH}")
+    print(f"Loading baseline model from: {MODEL_PATH}")
     model = SAC.load(MODEL_PATH, env=env)
 
     observation = env.reset()
     done = False
     step = 0
-    interventions = 0
     
-    print("\n--- TEST START: WATCHING FLIGHT PATH ---")
-    # Added Pitch column to the header
+    print("\n--- TEST START: WATCHING BASELINE FLIGHT PATH ---")
     print(f"{'Step':<6} | {'Alt (ft)':<10} | {'Dist (ft)':<10} | {'Roll (deg)':<10} | {'Pitch (deg)':<10} | {'Action Status'}")
     print("-" * 80)
 
-    monitor_thread = threading.Thread(target=system_monitor, args=("system_monitor_log.csv", 1.0))
+    monitor_thread = threading.Thread(target=system_monitor, args=("system_monitor_log_noMonitor.csv", 1.0))
     monitor_thread.daemon = True
     monitor_thread.start()
 
@@ -68,7 +63,6 @@ def run_debug_test():
         "altitude": [],
         "pitch": [],
         "roll": [],
-        "intervention": [],
         "disturbance": []
     }
 
@@ -78,11 +72,10 @@ def run_debug_test():
     try:
         while not done:
             # 0. Get the raw physical state for the current step BEFORE doing anything
-            # (Using base_env since you call it later in the logging block)
             raw_obs = base_env._get_obs() 
             
             # 1. Get action from RL Agent
-            original_action, _ = model.predict(observation, deterministic=True)
+            agent_action, _ = model.predict(observation, deterministic=True)
             
             # 2. Check if we are currently inside a wind gust window
             in_disturbance = False
@@ -92,33 +85,25 @@ def run_debug_test():
             # 3. Apply Controls
             if in_disturbance:
                 # ARTIFICIAL WIND GUST: Force max roll right, slight pitch down, max throttle
-                # This completely bypasses the RL Agent AND the Monitor!
-                safe_action = np.array([0.5, 1.0, 0.0, 1.0]) 
-                intervened = False # Monitor is offline during the gust
+                final_action = np.array([0.5, 1.0, 0.0, 1.0]) 
             else:
-                # NORMAL FLIGHT: Pass the agent's action through your RTA monitor
-                safe_action = apply_runtime(original_action[0], raw_obs)
-                # Check if the monitor changed the action
-                intervened = not np.allclose(original_action[0], safe_action, atol=1e-3)
+                # NORMAL FLIGHT: Pass the agent's action directly to the environment
+                final_action = agent_action[0]
 
-            if intervened:
-                interventions += 1
-                
             # --- LOG TELEMETRY ---
             telemetry["step"].append(step)
             telemetry["altitude"].append(raw_obs[2])
             telemetry["pitch"].append(np.degrees(raw_obs[4]))
             telemetry["roll"].append(np.degrees(raw_obs[3]))
-            telemetry["intervention"].append(intervened)
-            telemetry["disturbance"].append(in_disturbance) # Log the gust
+            telemetry["disturbance"].append(in_disturbance) 
             # ---------------------
 
             # 4. Execute Step
-            observation, reward, done_array, info = env.step([safe_action])
+            observation, reward, done_array, info = env.step([final_action])
             done = done_array[0]
             
-            # 5. LOGGING (Every 50 steps OR if intervention happens)
-            if step % 50 == 0 or intervened:
+            # 5. LOGGING (Every 50 steps)
+            if step % 50 == 0:
                 alt = raw_obs[2]
                 dist = np.linalg.norm(base_env.target_pos - raw_obs[:3])
                 
@@ -126,16 +111,9 @@ def run_debug_test():
                 roll_deg = math.degrees(raw_obs[3])
                 pitch_deg = math.degrees(raw_obs[4]) # Pitch is index 4
                 
-                status = "NORMAL"
-                if intervened:
-                    status = "!!! MONITOR TRIGGERED !!!"
+                status = "GUST APPLIED" if in_disturbance else "NORMAL (BASELINE)"
                 
                 print(f"{step:<6d} | {alt:<10.1f} | {dist:<10.1f} | {roll_deg:<10.1f} | {pitch_deg:<10.1f} | {status}")
-                
-                # If triggered, show details on next line
-                if intervened:
-                    print(f"       > Agent: {np.round(original_action[0], 3)}")
-                    print(f"       > Safe:  {np.round(safe_action, 3)}")
 
             step += 1
 
@@ -150,11 +128,7 @@ def run_debug_test():
     stop_monitor.set()
     monitor_thread.join()
     
-    print(f"Total Steps Flown: {step}")
-    print(f"Total Safety Interventions: {interventions}")
-
-    percentInt = interventions / step * 100 if step > 0 else 0
-    print(f"Intervention percentage: {percentInt:.2f}%")
+    print(f"\nTotal Steps Flown: {step}")
     
     # Safely pull the altitude from the raw, un-normalized final observation
     if 'final_raw_obs' in locals():
@@ -174,12 +148,12 @@ def run_debug_test():
     df = pd.DataFrame(telemetry).head(100000)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, "flight_baseline_telemetry.csv")
+    csv_path = os.path.join(script_dir, "flight_baseline_telemetry_noMonitor.csv")
 
     df.to_csv(csv_path, index=False)
     print(f"Telemetry saved to '{csv_path}'")
 
-def system_monitor(log_file="system_monitor_log.txt", interval=5):
+def system_monitor(log_file="system_monitor_log_noMonitor.txt", interval=5):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     full_dir = os.path.join(script_dir, log_file)
 
@@ -204,4 +178,4 @@ def system_monitor(log_file="system_monitor_log.txt", interval=5):
         
 
 if __name__ == "__main__":
-    run_debug_test()
+    run_baseline_test()

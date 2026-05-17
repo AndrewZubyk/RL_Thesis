@@ -32,7 +32,7 @@ class FlightEnvironment(gym.Env):
         # ... rest of setup ...
         self.target_pos = np.array([5000.0, 5000.0, 3000.0], dtype=np.float32)
         self.max_altitude = 10000.0
-        self.max_steps = 15000
+        self.max_steps = 1000000
         self.current_step = 0
 
         self.prev_dist = 0.0
@@ -105,6 +105,11 @@ class FlightEnvironment(gym.Env):
         if abs(pitch) > np.deg2rad(20):
             reward_stab -= 0.5
 
+        reward_time = -0.5
+        reward_throttle = 0.0
+        if action[3] < 0.0:
+            reward_throttle = action[3]
+
         # Terminal Rewards
         if terminated:
             if dist_3d < 100.0:
@@ -116,7 +121,7 @@ class FlightEnvironment(gym.Env):
             
         self.prev_dist = dist_3d
 
-        total_reward = reward_prog + reward_heading + reward_alt + reward_stab + 0.1
+        total_reward = reward_prog + reward_heading + reward_alt + reward_stab + reward_time + reward_throttle
         
         return float(total_reward)
     
@@ -139,6 +144,21 @@ class FlightEnvironment(gym.Env):
 
     def step(self, action):
         # Mapping: [Elevator, Aileron, Rudder, Throttle]
+
+        # Inject actions
+        scaled_action = np.zeros(4, dtype=np.float32)
+
+        scaled_action[0] = action[0] * 0.2
+        scaled_action[1] = action[1] * 0.2
+        scaled_action[2] = action[2] * 0.2
+        scaled_action[3] = (action[3] + 1.0) / 2.0
+
+        action_buffer = (ctypes.c_double * 4)(*scaled_action)
+
+        action_pointer = ctypes.cast(action_buffer, ctypes.POINTER(ctypes.c_double))
+        self.model.set_inputs(action_pointer)
+
+        self.model.set_inputs(action_pointer)
         
         self.model.Thesis_C___step()
         self.current_step += 1
@@ -165,13 +185,13 @@ class FlightEnvironment(gym.Env):
             terminated = True
             reward = -100.0
         
-        # CONSTRAINT 2: Pitch Limit (Max 25 deg)
-        elif abs(pitch_deg) > 25.0:
+        # CONSTRAINT 2: Pitch Limit (Max 25 deg) 40 for teting
+        elif abs(pitch_deg) > 60.0:
             terminated = True
             reward = -50.0
             
-        # CONSTRAINT 3: Roll Limit (Max 20 deg)
-        elif abs(roll_deg) > 20.0:
+        # CONSTRAINT 3: Roll Limit (Max 20 deg) 40 for testing
+        elif abs(roll_deg) > 60.0:
             terminated = True
             reward = -50.0 
 
@@ -194,6 +214,14 @@ class FlightEnvironment(gym.Env):
         
         self.current_step = 0
         self.model.Thesis_C___initialize()
+
+        # Randomize destination coords [X, Y, Z]
+        self.target_pos = np.array([
+            np.random.uniform(4000, 6000),
+            np.random.uniform(4000, 6000),
+            np.random.uniform(2500, 3500)        
+        ], dtype=np.float32)
+
         observation = self._get_obs()
 
         self.prev_dist = np.linalg.norm(self.target_pos - observation[:3])
